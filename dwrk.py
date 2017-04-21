@@ -8,6 +8,7 @@ import subprocess
 import threading
 import urllib
 import tarfile
+import json
 
 CWD = os.path.dirname(os.path.abspath(sys.argv[0]))
 
@@ -23,25 +24,56 @@ class Manager:
 
     def __init__(self, runners):
         self.runners = runners
-        self.runners_uniq = list(set(runners))
+        self.js = list()
 
     def run(self):
-        self.poll([runner.init() for runner in self.runners_uniq])
-        self.poll([runner.work() for runner in self.runners])
-        self.poll([runner.exit() for runner in self.runners_uniq])
+        class ManagerContext:
+            def __init__(self, manager):
+                self.manager = manager
+            def __enter__(self):
+                self.manager.fence([runner.init() for runner in self.manager.runners], \
+                        self.manager.runners, self.manager.proc_comm)
+                return self
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.manager.fence([runner.exit() for runner in self.manager.runners], \
+                        self.manager.runners, self.manager.proc_comm)
+            def run(self):
+                try:
+                    self.manager.fence([runner.work() for runner in self.manager.runners], \
+                            self.manager.runners, self.manager.proc_comm)
+                    self.manager.fence([runner.stat() for runner in self.manager.runners], \
+                            self.manager.runners, self.manager.proc_stat)
+                except KeyboardInterrupt:
+                    pass
+                except Exception as e:
+                    print e
+        with ManagerContext(self) as ctx:
+            ctx.run()
 
-    def poll(self, cs):
-        ps, ts = list(), list()
-        for c in cs:
-            ps.append(subprocess.Popen(c, stdout=subprocess.PIPE, stderr=subprocess.PIPE, \
-                    stdin=subprocess.PIPE))
-        for p in ps:
-            f = lambda p: p.communicate()
-            t = threading.Thread(target=f, args=(p,))
+    def fence(self, cmds, runners, routine):
+        ps = [subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, \
+                    stdin=subprocess.PIPE) for cmd in cmds]
+        ts = [threading.Thread(target=routine, args=(p, runner)) for (p, runner) in zip(ps, runners)]
+        for t in ts:
             t.start()
-            ts.append(t)
         for t in ts:
             t.join()
+
+    def stat(self):
+        if self.js:
+            print len(self.js)
+            print self.js
+
+    def proc_comm(self, p, runner):
+        p.communicate()
+
+    def proc_stat(self, p, runner):
+        stdoutdata, stderrdata = p.communicate()
+        if stdoutdata:
+            try:
+                self.js.append(json.loads(stdoutdata))
+            except ValueError:
+                print "Invalid json returned from", str(runner)
 
 class Runner:
 
@@ -49,22 +81,30 @@ class Runner:
         self.host = host
         self.cmd = cmd
         self.opt = opt
+        self.statfile = '/tmp/stat.wrk.{}'.format(id(self))
 
     def init(self):
         return ['scp', WRK_BIN, '{}:{}'.format(self.host, WRK_BIN_RMT)]
 
     def exit(self):
-        return ['ssh', self.host, 'rm', WRK_BIN_RMT]
+        return ['ssh', self.host, 'rm', '-f', WRK_BIN_RMT, self.statfile]
 
     def work(self):
-        return ['ssh', '-t', '-t', self.host, '/bin/bash', '-O', 'huponexit', '-c', \
-                '\"%s\"' % ' '.join([WRK_BIN_RMT] + self.opt)]
+        return ['ssh', '-t', '-t', '-q', self.host, '/bin/bash', '-O', 'huponexit', \
+                '-c', '\"{}\"'.format(' '.join([WRK_BIN_RMT, '--json'] + self.opt + \
+                ['2>{}'.format(self.statfile)]))]
+
+    def stat(self):
+        return ['ssh', self.host, 'cat', self.statfile]
 
     def __eq__(self, other):
         return self.host == other.host
 
     def __hash__(self):
         return hash(self.host)
+
+    def __str__(self):
+        return self.host
 
 def build_binary(path='/tmp'):
     os.chdir(path)
@@ -96,8 +136,9 @@ def read_hosts():
 
 def verify_hosts(hosts):
     print 'Verifying hosts...'
-    for host in set(hosts):
-        subprocess.check_call(['ssh', '-t', '-t', host, '-oStrictHostKeyChecking=no', 'exit', '0'])
+    for host in hosts:
+        subprocess.check_call(['ssh', '-t', '-t', '-q', host, '-oStrictHostKeyChecking=no', \
+                'exit', '0'])
         print 'Host %s is OK' % host
 
 def main():
@@ -123,6 +164,7 @@ def main():
     runners = [Runner(host, WRK_BIN_RMT, opt) for host in hosts]
     manager = Manager(runners)
     manager.run()
+    manager.stat()
 
 if __name__ == '__main__':
     main()
