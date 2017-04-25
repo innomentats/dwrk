@@ -32,15 +32,15 @@ class Manager:
                 self.manager = manager
             def __enter__(self):
                 self.manager.fence([runner.init() for runner in self.manager.runners], \
-                        self.manager.runners, self.manager.proc_comm)
+                        self.manager.runners, self.manager.proc_init)
                 return self
             def __exit__(self, exc_type, exc_value, traceback):
                 self.manager.fence([runner.exit() for runner in self.manager.runners], \
-                        self.manager.runners, self.manager.proc_comm)
+                        self.manager.runners, self.manager.proc_exit)
             def run(self):
                 try:
                     self.manager.fence([runner.work() for runner in self.manager.runners], \
-                            self.manager.runners, self.manager.proc_comm)
+                            self.manager.runners, self.manager.proc_work)
                     self.manager.fence([runner.stat() for runner in self.manager.runners], \
                             self.manager.runners, self.manager.proc_stat)
                 except KeyboardInterrupt:
@@ -51,6 +51,7 @@ class Manager:
             ctx.run()
 
     def fence(self, cmds, runners, routine):
+        print cmds[0]
         ps = [subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, \
                     stdin=subprocess.PIPE) for cmd in cmds]
         ts = [threading.Thread(target=routine, args=(p, runner)) for (p, runner) in zip(ps, runners)]
@@ -64,16 +65,28 @@ class Manager:
             print len(self.js)
             print self.js
 
-    def proc_comm(self, p, runner):
+    def proc_init(self, p, runner):
         p.communicate()
+
+    def proc_exit(self, p, runner):
+        p.communicate()
+
+    def proc_work(self, p, runner):
+        runner.stdout, runner.stderr = p.communicate()
 
     def proc_stat(self, p, runner):
         stdoutdata, stderrdata = p.communicate()
         if stdoutdata:
             try:
+                print 'statfile: ', stdoutdata
                 self.js.append(json.loads(stdoutdata))
+                return
             except ValueError:
-                print "Invalid json returned from", str(runner)
+                print 'Invalid json returned from', str(runner)
+        else:
+            print 'No json returned from', str(runner)
+        print 'STDOUT from:', str(runner), runner.stdout
+        print 'STDERR from:', str(runner), runner.stderr
 
 class Runner:
 
@@ -91,8 +104,7 @@ class Runner:
 
     def work(self):
         return ['ssh', '-t', '-t', '-q', self.host, '/bin/bash', '-O', 'huponexit', \
-                '-c', '\"{}\"'.format(' '.join([WRK_BIN_RMT, '--json'] + self.opt + \
-                ['2>{}'.format(self.statfile)]))]
+                '-c', '\"{}\"'.format(' '.join([WRK_BIN_RMT, '--json', self.statfile] + self.opt))]
 
     def stat(self):
         return ['ssh', self.host, 'cat', self.statfile]
