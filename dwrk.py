@@ -9,6 +9,7 @@ import threading
 import urllib
 import tarfile
 import json
+import re
 
 CWD = os.path.dirname(os.path.abspath(sys.argv[0]))
 
@@ -19,6 +20,148 @@ WRK_TAR = 'master.tar.gz'
 WRK_DIR = 'wrk-master'
 WRK_BIN = os.path.join(CWD, 'wrk')
 WRK_BIN_RMT = '/tmp/wrk'
+
+SCALE_TIME = {
+        'ms': 1000,
+        's': 1000 * 1000,
+        'm': 1000 * 1000 * 60,
+        'h': 1000 * 1000 * 60 * 60,
+}
+
+SCALE_METRIC = {
+        'K': 1e3,
+        'M': 1e6,
+        'G': 1e9,
+        'T': 1e12,
+        'P': 1e15,
+}
+
+SCALE_BINARY = {
+        'KB': 1 << 10,
+        'MB': 1 << 20,
+        'GB': 1 << 30,
+        'TB': 1 << 40,
+        'PB': 1 << 50,
+}
+
+class Record:
+
+    fmt = '''\
+Record:
+    threads: {record.threads}
+    connections: {record.connections}
+    time_set: {record.time_set}
+    time_run: {record.time_run}
+    requests: {record.requests}
+    rps: {record.rps}
+    read: {record.read}
+    bandwidth: {record.bandwidth}
+    thread_stat_latency:
+        mean: {ltc[mean]}
+        stdev: {ltc[stdev]}
+        max: {ltc[max]}
+        +/- stdev: {ltc[+/- stdev]}
+    thread_stat_rsp:
+        mean: {rps[mean]}
+        stdev: {rps[stdev]}
+        max: {rps[max]}
+        +/- stdev: {rps[+/- stdev]}'''
+
+    def __init__(self, json):
+        self.threads = 0
+        self.connections = 0
+        self.time_set = 0
+        self.time_run = 0
+        self.requests = 0
+        self.rps = 0
+        self.read = 0
+        self.bandwidth = 0
+        self.thread_stat_latency = {
+                "mean": 0,
+                "stdev": 0,
+                "max": 0,
+                "+/- stdev": 0,
+                }
+        self.thread_stat_rps = {
+                "mean": 0,
+                "stdev": 0,
+                "max": 0,
+                "+/- stdev": 0,
+                }
+        self.json = json
+        self.parse()
+
+    def __str__(self):
+        return Record.fmt.format(record=self,
+                ltc=self.thread_stat_latency,
+                rps=self.thread_stat_rps)
+
+    def parse(self):
+        if 'threads' in self.json:
+            self.threads = int(self.json['threads'])
+        if 'connections' in self.json:
+            self.connections = int(self.json['connections'])
+        if 'time_set' in self.json:
+            self.time_set = self.parse_time(self.json['time_set'])
+        if 'time_run' in self.json:
+            self.time_run = self.parse_time(self.json['time_run'])
+        if 'requests' in self.json:
+            self.requests = int(self.json['requests'])
+        if 'rps' in self.json:
+            self.rps = float(self.json['rps'])
+        if 'read' in self.json:
+            self.read = self.parse_binary(self.json['read'])
+        if 'bandwidth' in self.json:
+            self.bandwidth = self.parse_binary(self.json['bandwidth'])
+
+    def parse_time(self, time):
+        p = re.compile('([\d.]+)\s*(\w+)')
+        t = p.match(time).groups()
+        if len(t) == 2:
+            val = float(t[0])
+            scl = SCALE_TIME[t[1]]
+            return val * scl
+        else:
+            raise ValueError('Invalid time: %s' % time)
+
+    def parse_binary(self, binary):
+        p = re.compile('([\d.]+)\s*(\w+)')
+        t = p.match(binary).groups()
+        if len(t) == 1:
+            return float(t[0])
+        if len(t) == 2:
+            val = float(t[0])
+            scl = SCALE_BINARY[t[1]]
+            return val * scl
+        else:
+            raise ValueError('Invalid binary: %s' % binary)
+
+    def parse_metric(self, metric):
+        p = re.compile('([\d.]+)\s*(\w+)')
+        t = p.match(metric).groups()
+        if len(t) == 1:
+            return float(t[0])
+        if len(t) == 2:
+            val = float(t[0])
+            scl = SCALE_METRIC[t[1]]
+            return val * scl
+        else:
+            raise ValueError('Invalid metric: %s' % metric)
+
+    def parse_decimal(self, decimal):
+        pass
+
+class Parser:
+
+    def __init__(self, js):
+        self.js = js
+
+    def parse(self):
+        self.rs = [Record(j) for j in self.js]
+
+    def merge(self):
+        for r in self.rs:
+            print r
 
 class Manager:
 
@@ -61,8 +204,9 @@ class Manager:
 
     def stat(self):
         if self.js:
-            print len(self.js)
-            print self.js
+            parser = Parser(self.js)
+            parser.parse()
+            parser.merge()
 
     def proc_init(self, p, runner):
         p.communicate()
@@ -77,7 +221,6 @@ class Manager:
         stdoutdata, stderrdata = p.communicate()
         if stdoutdata:
             try:
-                print 'statfile: ', stdoutdata
                 self.js.append(json.loads(stdoutdata))
                 return
             except ValueError:
