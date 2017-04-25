@@ -51,7 +51,6 @@ class Manager:
             ctx.run()
 
     def fence(self, cmds, runners, routine):
-        print cmds[0]
         ps = [subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, \
                     stdin=subprocess.PIPE) for cmd in cmds]
         ts = [threading.Thread(target=routine, args=(p, runner)) for (p, runner) in zip(ps, runners)]
@@ -85,8 +84,10 @@ class Manager:
                 print 'Invalid json returned from', str(runner)
         else:
             print 'No json returned from', str(runner)
-        print 'STDOUT from:', str(runner), runner.stdout
-        print 'STDERR from:', str(runner), runner.stderr
+        print 'STDOUT from %s:' % str(runner)
+        print runner.stdout
+        print 'STDERR from %s:' % str(runner)
+        print runner.stderr
 
 class Runner:
 
@@ -120,25 +121,26 @@ class Runner:
 
 def build_binary(path='/tmp'):
     os.chdir(path)
+    try:
+        # download
+        print 'Downloading WRK...'
+        urllib.urlretrieve(WRK_URL, WRK_TAR)
+        tar = tarfile.open(WRK_TAR, 'r:gz')
+        tar.extractall()
 
-    # download
-    print 'Downloading WRK...'
-    urllib.urlretrieve(WRK_URL, WRK_TAR)
-    tar = tarfile.open(WRK_TAR, 'r:gz')
-    tar.extractall()
+        # build
+        print 'Building WRK...'
+        os.chdir(WRK_DIR)
+        subprocess.check_call(['make'])
 
-    # build
-    print 'Building WRK...'
-    os.chdir(WRK_DIR)
-    subprocess.check_call(['make'])
-
-    # copy file
-    os.chdir(CWD)
-    shutil.copy2(os.path.join(path, WRK_DIR, 'wrk'), WRK_BIN)
-
-    # clear
-    os.remove(os.path.join(path, WRK_TAR))
-    shutil.rmtree(os.path.join(path, WRK_DIR), ignore_errors=True)
+        # copy file
+        shutil.copy2(os.path.join(path, WRK_DIR, 'wrk'), os.path.join(path, WRK_BIN))
+    finally:
+        # switch back
+        os.chdir(CWD)
+        # clear
+        os.remove(os.path.join(path, WRK_TAR))
+        shutil.rmtree(os.path.join(path, WRK_DIR), ignore_errors=True)
 
 def read_hosts():
     with open(HOST) as f:
