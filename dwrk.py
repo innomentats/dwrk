@@ -47,27 +47,26 @@ SCALE_BINARY = {
 class Record:
 
     fmt = '''\
-Record:
-    threads: {record.threads}
-    connections: {record.connections}
-    time_set: {record.time_set}
-    time_run: {record.time_run}
-    requests: {record.requests}
-    rps: {record.rps}
-    read: {record.read}
-    bandwidth: {record.bandwidth}
-    thread_stat_latency:
-        mean: {ltc[mean]}
-        stdev: {ltc[stdev]}
-        max: {ltc[max]}
-        +/- stdev: {ltc[+/- stdev]}
-    thread_stat_rsp:
-        mean: {rps[mean]}
-        stdev: {rps[stdev]}
-        max: {rps[max]}
-        +/- stdev: {rps[+/- stdev]}'''
+threads: {record.threads}
+connections: {record.connections}
+time_set: {record.time_set}
+time_run: {record.time_run}
+requests: {record.requests}
+rps: {record.rps}
+read: {record.read}
+bandwidth: {record.bandwidth}
+thread_stat_latency:
+    mean: {ltc[mean]}
+    stdev: {ltc[stdev]}
+    max: {ltc[max]}
+    +/- stdev: {ltc[+/- stdev]}
+thread_stat_rsp:
+    mean: {rps[mean]}
+    stdev: {rps[stdev]}
+    max: {rps[max]}
+    +/- stdev: {rps[+/- stdev]}'''
 
-    def __init__(self, json):
+    def __init__(self):
         self.threads = 0
         self.connections = 0
         self.time_set = 0
@@ -88,31 +87,49 @@ Record:
                 "max": 0,
                 "+/- stdev": 0,
                 }
-        self.json = json
-        self.parse()
+        self.samples = 0
 
     def __str__(self):
         return Record.fmt.format(record=self,
                 ltc=self.thread_stat_latency,
                 rps=self.thread_stat_rps)
 
-    def parse(self):
-        if 'threads' in self.json:
-            self.threads = int(self.json['threads'])
-        if 'connections' in self.json:
-            self.connections = int(self.json['connections'])
-        if 'time_set' in self.json:
-            self.time_set = self.parse_time(self.json['time_set'])
-        if 'time_run' in self.json:
-            self.time_run = self.parse_time(self.json['time_run'])
-        if 'requests' in self.json:
-            self.requests = int(self.json['requests'])
-        if 'rps' in self.json:
-            self.rps = float(self.json['rps'])
-        if 'read' in self.json:
-            self.read = self.parse_binary(self.json['read'])
-        if 'bandwidth' in self.json:
-            self.bandwidth = self.parse_binary(self.json['bandwidth'])
+    def parse(self, json):
+        if json:
+            self.json = json
+            self.samples = 1
+            if 'threads' in self.json:
+                self.threads = int(self.json['threads'])
+            if 'connections' in self.json:
+                self.connections = int(self.json['connections'])
+            if 'time_set' in self.json:
+                self.time_set = self.parse_time(self.json['time_set'])
+            if 'time_run' in self.json:
+                self.time_run = self.parse_time(self.json['time_run'])
+            if 'requests' in self.json:
+                self.requests = int(self.json['requests'])
+            if 'rps' in self.json:
+                self.rps = float(self.json['rps'])
+            if 'read' in self.json:
+                self.read = self.parse_binary(self.json['read'])
+            if 'bandwidth' in self.json:
+                self.bandwidth = self.parse_binary(self.json['bandwidth'])
+            if 'thread_stat_latency' in self.json:
+                self.parse_stat('thread_stat_latency', self.parse_time)
+            if 'thread_stat_rps' in self.json:
+                self.parse_stat('thread_stat_rps', self.parse_metric)
+        return self
+
+    def parse_stat(self, attr, parser):
+        dat, res = self.json[attr], getattr(self, attr)
+        if 'mean' in dat:
+            res['mean'] = parser(dat['mean'])
+        if 'stdev' in dat:
+            res['stdev'] = parser(dat['stdev'])
+        if 'max' in dat:
+            res['max'] = parser(dat['max'])
+        if '+/- stdev' in dat:
+            res['+/- stdev'] = self.parse_decimal(dat['+/- stdev'])
 
     def parse_time(self, time):
         p = re.compile('([\d.]+)\s*(\w+)')
@@ -149,19 +166,75 @@ Record:
             raise ValueError('Invalid metric: %s' % metric)
 
     def parse_decimal(self, decimal):
-        pass
+        p = re.compile('([\d.]+)\s*([%])')
+        t = p.match(decimal).groups()
+        if len(t) == 1:
+            return float(t[0])
+        if len(t) == 2:
+            return float(t[0]) * 0.01
+        else:
+            raise ValueError('Invalid decimal: %s' % decimal)
+
+    def merge(self, other):
+        self.merge_stat(other, 'thread_stat_latency')
+        self.merge_stat(other, 'thread_stat_rps')
+
+        self.time_set = self.merge_samples(other, 'time_set')
+        self.time_run = self.merge_samples(other, 'time_run')
+
+        self.threads += other.threads
+        self.connections += other.connections
+        self.requests += other.requests
+        self.rps += other.rps
+        self.read += other.read
+        self.bandwidth += other.bandwidth
+
+        self.samples += other.samples
+        return self
+
+    def merge_samples(self, other, attr):
+        return Record.merge_mean(getattr(self, attr), getattr(other, attr), \
+                self.samples, other.samples)
+
+    def merge_stat(self, other, attr):
+        sa, oa = getattr(self, attr), getattr(other, attr)
+        sa['+/- stdev'] = Record.merge_stdev_perc(sa['+/- stdev'], oa['+/- stdev'], \
+                sa['stdev'], oa['stdev'], sa['mean'], oa['mean'], \
+                self.requests, other.requests)
+        sa['stdev'] = Record.merge_stdev(sa['stdev'], oa['stdev'], \
+                sa['mean'], oa['mean'], self.requests, other.requests)
+        sa['mean'] = Record.merge_mean(sa['mean'], oa['mean'], \
+                self.requests, other.requests)
+        sa['max'] = max(sa['max'], oa['max'])
+
+
+    @staticmethod
+    def merge_mean(ma, mb, na, nb):
+        return (ma * na + mb * nb) / (na + nb)
+
+    @staticmethod
+    def merge_stdev(da, db, ma, mb, na, nb):
+        return 0
+
+    @staticmethod
+    def merge_stdev_perc(pa, pb, da, db, ma, mb, na, nb):
+        return 0
 
 class Parser:
 
     def __init__(self, js):
         self.js = js
+        self.records = None
+        self.result = Record()
 
     def parse(self):
-        self.rs = [Record(j) for j in self.js]
+        self.records = [Record().parse(j) for j in self.js]
 
     def merge(self):
-        for r in self.rs:
-            print r
+        self.result = reduce(lambda x, y: x.merge(y), self.records, self.result)
+        #for r in self.records:
+        #    print r
+        print self.result
 
 class Manager:
 
