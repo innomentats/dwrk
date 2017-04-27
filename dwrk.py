@@ -3,6 +3,7 @@
 
 import os
 import sys
+import getopt
 import shutil
 import subprocess
 import threading
@@ -11,15 +12,14 @@ import tarfile
 import json
 import re
 
-CWD = os.path.dirname(os.path.abspath(sys.argv[0]))
-
-HOST = 'hosts'
+CWD = os.getcwd()
 
 WRK_URL = 'https://github.com/innomentats/wrk/archive/master.tar.gz'
 WRK_TAR = 'master.tar.gz'
 WRK_DIR = 'wrk-master'
 WRK_BIN = os.path.join(CWD, 'wrk')
-WRK_BIN_RMT = '/tmp/wrk'
+WRK_HOST = os.path.join(CWD, 'host')
+WRK_REMOTE = '/tmp/wrk'
 
 SCALE_TIME = {
         'ms': 1000,
@@ -315,14 +315,14 @@ class Runner:
         self.statfile = '/tmp/stat.wrk.{}'.format(id(self))
 
     def init(self):
-        return ['scp', WRK_BIN, '{}:{}'.format(self.host, WRK_BIN_RMT)]
+        return ['scp', WRK_BIN, '{}:{}'.format(self.host, WRK_REMOTE)]
 
     def exit(self):
-        return ['ssh', self.host, 'rm', '-f', WRK_BIN_RMT, self.statfile]
+        return ['ssh', self.host, 'rm', '-f', WRK_REMOTE, self.statfile]
 
     def work(self):
         return ['ssh', '-t', '-t', '-q', self.host, '/bin/bash', '-O', 'huponexit', \
-                '-c', '\"{}\"'.format(' '.join([WRK_BIN_RMT, '--json', self.statfile] + self.opt))]
+                '-c', '\"{}\"'.format(' '.join([WRK_REMOTE, '--json', self.statfile] + self.opt))]
 
     def stat(self):
         return ['ssh', self.host, 'cat', self.statfile]
@@ -336,9 +336,21 @@ class Runner:
     def __str__(self):
         return self.host
 
-def build_binary(path='/tmp'):
-    os.chdir(path)
+def build_binary(opt=None):
+    if not opt:
+        path='/tmp'
+    elif len(opt) == 1:
+        path = opt[0]
+    else:
+        raise ValueError('Too many arguments: {}'.format(str(opt)))
+
+    if not os.path.exists(path) or not os.path.isdir(path):
+        raise ValueError('Invalid build directory: {}'.format(path))
+
     try:
+        # build dir
+        os.chdir(path)
+
         # download
         print 'Downloading WRK...'
         urllib.urlretrieve(WRK_URL, WRK_TAR)
@@ -351,16 +363,20 @@ def build_binary(path='/tmp'):
         subprocess.check_call(['make'])
 
         # copy file
-        shutil.copy2(os.path.join(path, WRK_DIR, 'wrk'), os.path.join(path, WRK_BIN))
+        shutil.copy2(os.path.join(path, WRK_DIR, 'wrk'),  WRK_BIN)
+
     finally:
-        # switch back
-        os.chdir(CWD)
-        # clear
-        os.remove(os.path.join(path, WRK_TAR))
-        shutil.rmtree(os.path.join(path, WRK_DIR), ignore_errors=True)
+        try:
+            # switch back
+            os.chdir(CWD)
+            # clear downloaded file and build dir
+            os.remove(os.path.join(path, WRK_TAR))
+            shutil.rmtree(os.path.join(path, WRK_DIR), ignore_errors=True)
+        except:
+            pass
 
 def read_hosts():
-    with open(HOST) as f:
+    with open(WRK_HOST) as f:
         hosts = f.read()
         return filter(lambda x: x != '' and not x.startswith('#'), \
                 [line.strip() for line in hosts.splitlines()])
@@ -372,12 +388,80 @@ def verify_hosts(hosts):
                 'exit', '0'])
         print 'Host %s is OK' % host
 
-def main():
-    print 'Verifying ssh...'
-    subprocess.check_call(['ssh', '-V'])
+def parse_opt():
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "b:h:", [])
+    except getopt.GetoptError as err:
+        raise err
 
-    if not os.path.exists(HOST):
-        print 'No host file found'
+    global WRK_BIN, WRK_HOST
+    for o, a in opts:
+        if o == '-b':
+            WRK_BIN = os.path.abspath(a)
+        elif o == '-h':
+            WRK_HOST = os.path.abspath(a)
+        else:
+            raise ValueError("unhandled option")
+
+    if not args:
+        return None, None
+
+    cmd = args[0]
+    cmd_opt = args[1:]
+    return cmd, cmd_opt
+
+def print_help():
+    print '''\
+Usage: {dwrk} <options> command <command_options>
+
+Commands:
+    help
+        Show this help message
+    build
+        Download and build wrk binary
+    run <wrk_options> url
+        Run dwrk using wrk compatible options
+
+Options:
+    -b file
+        Specify wrk binary file
+    -h file
+        Specify host file
+
+Example:
+    {dwrk} build
+    {dwrk} run -t2 -c10 -d10s http://127.0.0.1
+    {dwrk} -b /tmp/wrk -h /tmp/host run -t2 -c10 -d10s http://127.0.0.1
+'''.format(dwrk=sys.argv[0])
+
+def main():
+    cmd, cmd_opt = parse_opt()
+
+    if not cmd or cmd not in ("help", "build", "run"):
+        if cmd:
+            print 'Unknown command: %s' % cmd
+        print_help()
+        return
+
+    if cmd == 'help':
+        print_help()
+        return
+    elif cmd == 'build':
+        try:
+            build_binary(cmd_opt)
+        except ValueError as e:
+            print 'Failed to build binary: {}'.format(e)
+        return
+
+    if not os.path.exists(WRK_BIN):
+        print 'No wrk binary found. You can use \'{} build\' to create one, '\
+                'or specify it using \'-b\' option'.format(sys.argv[0])
+        print 'See more help info using \'{} help\''.format(sys.argv[0])
+        sys.exit(1)
+
+    if not os.path.exists(WRK_HOST):
+        print 'No host file found. Specify it using \'-h\' option'
+        print 'See more help info using \'{} help\''.format(sys.argv[0])
         sys.exit(1)
 
     hosts = read_hosts()
@@ -387,12 +471,7 @@ def main():
 
     verify_hosts(hosts)
 
-    if not os.path.exists(WRK_BIN):
-        build_binary()
-
-    opt = sys.argv[1:]
-
-    runners = [Runner(host, WRK_BIN_RMT, opt) for host in hosts]
+    runners = [Runner(host, WRK_REMOTE, cmd_opt) for host in hosts]
     manager = Manager(runners)
     manager.run()
     manager.stat()
