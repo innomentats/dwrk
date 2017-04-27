@@ -60,7 +60,7 @@ thread_stat_latency:
     stdev: {ltc[stdev]}
     max: {ltc[max]}
     +/- stdev: {ltc[+/- stdev]}
-thread_stat_rsp:
+thread_stat_rps:
     mean: {rps[mean]}
     stdev: {rps[stdev]}
     max: {rps[max]}
@@ -214,7 +214,8 @@ thread_stat_rsp:
 
     @staticmethod
     def merge_stdev(da, db, ma, mb, na, nb):
-        return 0
+        return ((na * (da ** 2 + ma ** 2) + nb * (db ** 2 + mb ** 2)) / (na + nb) - \
+                Record.merge_mean(ma, mb, na, nb) ** 2) ** 0.5
 
     @staticmethod
     def merge_stdev_perc(pa, pb, da, db, ma, mb, na, nb):
